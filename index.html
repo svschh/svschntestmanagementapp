@@ -605,7 +605,7 @@ const KEY_MODE = "tc-cockpit.mode.v1";
    Kein echter Schutz vor technisch versierten Personen - der Wert
    steht im Quelltext. Reicht, um zufaellige Besucher fernzuhalten.
    ============================================================ */
-const TEAM_PASSWORD = "Schere";
+const TEAM_PASSWORD = "BITTE-HIER-PASSWORT-EINTRAGEN";
 const LOCK_KEY = "tc-cockpit.unlocked.v1";
 
 /* ============================================================
@@ -622,6 +622,7 @@ const SYNC_POLL_MS = 8000; // wie oft im Hintergrund nach Aenderungen anderer ge
 let syncBusy = false;
 let lastKnownJSON = null;
 let saveInFlight = null;
+let dirty = false; // true = es gibt lokale Aenderungen, die noch nicht hochgeladen wurden
 
 function applyLoadedState(parsed, text){
   if(!(parsed && Array.isArray(parsed.themes))) return false;
@@ -655,7 +656,8 @@ async function syncLoadInitial(){
 }
 
 async function syncSave(isInitial){
-  if(syncBusy){ saveInFlight = state; return; }
+  dirty = true;
+  if(syncBusy){ saveInFlight = true; return; }
   syncBusy = true;
   try{
     const text = JSON.stringify(state);
@@ -664,24 +666,28 @@ async function syncSave(isInitial){
       headers: { "Content-Type": "application/json" },
       body: text
     });
-    if(res.ok) lastKnownJSON = text;
+    if(res.ok){ lastKnownJSON = text; dirty = false; }
     else if(!isInitial) toast("Speichern fehlgeschlagen (" + res.status + ")", true);
   }catch(e){
     if(!isInitial) toast("Speichern fehlgeschlagen \u2013 Verbindung pr\u00fcfen.", true);
   }finally{
     syncBusy = false;
-    if(saveInFlight){ saveInFlight = null; syncSave(); }
+    if(saveInFlight){ saveInFlight = false; syncSave(); }
   }
 }
 
 async function syncPullSilently(){
-  if(syncBusy) return;
+  // Solange noch nicht hochgeladene lokale Aenderungen bestehen (dirty) oder gerade
+  // ein Speichervorgang laeuft, NIE einen Hintergrund-Abgleich anwenden - das wuerde
+  // sonst frisch getippte, noch ungesicherte Eingaben ueberschreiben.
+  if(syncBusy || dirty) return;
   try{
     const res = await fetch(API_URL, { cache: "no-store" });
     if(!res.ok) return;
     const data = await res.json();
     if(!data) return;
     const text = JSON.stringify(data);
+    if(dirty) return; // waehrend des Wartens auf die Antwort ist evtl. etwas dazwischengekommen
     if(text !== lastKnownJSON){
       if(applyLoadedState(data, text)){
         Store.set(KEY_DATA, text);
@@ -800,6 +806,7 @@ function load(){
 let saveTimer = null;
 let syncSaveTimer = null;
 function save(){
+  dirty = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => Store.set(KEY_DATA, JSON.stringify(state)), 220);
   clearTimeout(syncSaveTimer);
