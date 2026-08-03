@@ -1,24 +1,35 @@
 import { getStore } from "@netlify/blobs";
 
-// Zentraler, automatischer Speicher fuer den Teststand.
-// GET  -> liefert den aktuellen Stand (oder null, falls noch nichts gespeichert wurde)
-// POST -> speichert den mitgeschickten Stand fuer alle
+// Zentraler, automatischer Speicher fuer den Teststand, mit einfacher
+// Versionspruefung: ein Speichervorgang wird nur uebernommen, wenn er
+// auf dem zuletzt bekannten Stand aufbaut. So verhindern wir, dass ein
+// veralteter Browser-Tab neuere Aenderungen eines anderen Teammitglieds
+// versehentlich ueberschreibt.
+const NO_STORE = { "Content-Type": "application/json", "Cache-Control": "no-store, no-cache, must-revalidate" };
+
 export default async (req) => {
   const store = getStore("testcase-cockpit");
 
   if (req.method === "GET") {
-    const data = await store.get("state", { type: "json" });
-    return new Response(JSON.stringify(data ?? null), {
-      headers: { "Content-Type": "application/json" }
-    });
+    const record = (await store.get("state", { type: "json" })) || { version: 0, data: null };
+    return new Response(JSON.stringify(record), { headers: NO_STORE });
   }
 
   if (req.method === "POST") {
-    const body = await req.json();
-    await store.setJSON("state", body);
-    return new Response(JSON.stringify({ ok: true }), {
-      headers: { "Content-Type": "application/json" }
-    });
+    const incoming = await req.json(); // { baseVersion, data }
+    const current = (await store.get("state", { type: "json" })) || { version: 0, data: null };
+
+    if (typeof incoming.baseVersion === "number" && incoming.baseVersion !== current.version) {
+      // Jemand anderes hat zwischenzeitlich gespeichert -> ablehnen, Client gleicht ab und versucht erneut
+      return new Response(JSON.stringify({ conflict: true, version: current.version, data: current.data }), {
+        status: 409,
+        headers: NO_STORE
+      });
+    }
+
+    const next = { version: current.version + 1, data: incoming.data };
+    await store.setJSON("state", next);
+    return new Response(JSON.stringify({ ok: true, version: next.version }), { headers: NO_STORE });
   }
 
   return new Response("Method not allowed", { status: 405 });
