@@ -703,7 +703,7 @@ async function syncPullSilently(){
     const record = await res.json();
     if(!record.data) return;
     if(dirty) return; // waehrend des Wartens auf die Antwort ist evtl. etwas dazwischengekommen
-    if(record.version === serverVersion) return; // nichts Neues
+    if(record.version <= serverVersion) return; // nur wirklich NEUERE Staende uebernehmen (schuetzt vor leicht verzoegerten/veralteten Antworten)
     const text = JSON.stringify(record.data);
     if(applyLoadedState(record.data, text)){
       serverVersion = record.version;
