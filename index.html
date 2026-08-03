@@ -617,11 +617,12 @@ const LOCK_KEY = "tc-cockpit.unlocked.v1";
    bei lokalem Oeffnen per Doppelklick).
    ============================================================ */
 const API_URL = "/api/data";
-const SYNC_POLL_MS = 8000; // wie oft im Hintergrund nach Aenderungen anderer gesucht wird
+const SYNC_POLL_MS = 6000; // wie oft im Hintergrund nach Aenderungen anderer gesucht wird
 
 let syncBusy = false;
 let lastKnownJSON = null;
-let saveInFlight = null;
+let serverVersion = 0; // Versionsnummer des zuletzt bekannten Server-Standes (Kollisionsschutz)
+let saveInFlight = false;
 let dirty = false; // true = es gibt lokale Aenderungen, die noch nicht hochgeladen wurden
 
 function applyLoadedState(parsed, text){
@@ -638,12 +639,13 @@ function applyLoadedState(parsed, text){
 
 async function syncLoadInitial(){
   try{
-    const res = await fetch(API_URL, { cache: "no-store" });
+    const res = await fetch(API_URL + "?t=" + Date.now(), { cache: "no-store" });
     if(res.ok){
-      const data = await res.json();
-      if(data){
-        const text = JSON.stringify(data);
-        if(applyLoadedState(data, text)) renderAll();
+      const record = await res.json();
+      serverVersion = record.version || 0;
+      if(record.data){
+        const text = JSON.stringify(record.data);
+        if(applyLoadedState(record.data, text)) renderAll();
       } else {
         // Noch nichts gespeichert -> aktuellen (lokalen/Seed-) Stand einmalig anlegen
         await syncSave(true);
@@ -664,10 +666,24 @@ async function syncSave(isInitial){
     const res = await fetch(API_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: text
+      body: JSON.stringify({ baseVersion: serverVersion, data: state })
     });
-    if(res.ok){ lastKnownJSON = text; dirty = false; }
-    else if(!isInitial) toast("Speichern fehlgeschlagen (" + res.status + ")", true);
+    if(res.status === 409){
+      // Jemand anderes hat zwischenzeitlich gespeichert: unseren Versionsstand nachziehen
+      // und denselben (lokal weiterhin vorhandenen) Stand direkt danach erneut versuchen.
+      const conflict = await res.json();
+      serverVersion = conflict.version || serverVersion;
+      syncBusy = false;
+      return syncSave(isInitial);
+    }
+    if(res.ok){
+      const ok = await res.json();
+      serverVersion = ok.version || serverVersion;
+      lastKnownJSON = text;
+      dirty = false;
+    } else if(!isInitial){
+      toast("Speichern fehlgeschlagen (" + res.status + ")", true);
+    }
   }catch(e){
     if(!isInitial) toast("Speichern fehlgeschlagen \u2013 Verbindung pr\u00fcfen.", true);
   }finally{
@@ -682,18 +698,18 @@ async function syncPullSilently(){
   // sonst frisch getippte, noch ungesicherte Eingaben ueberschreiben.
   if(syncBusy || dirty) return;
   try{
-    const res = await fetch(API_URL, { cache: "no-store" });
+    const res = await fetch(API_URL + "?t=" + Date.now(), { cache: "no-store" });
     if(!res.ok) return;
-    const data = await res.json();
-    if(!data) return;
-    const text = JSON.stringify(data);
+    const record = await res.json();
+    if(!record.data) return;
     if(dirty) return; // waehrend des Wartens auf die Antwort ist evtl. etwas dazwischengekommen
-    if(text !== lastKnownJSON){
-      if(applyLoadedState(data, text)){
-        Store.set(KEY_DATA, text);
-        renderAll();
-        toast("Teststand von anderen Mitgliedern aktualisiert");
-      }
+    if(record.version === serverVersion) return; // nichts Neues
+    const text = JSON.stringify(record.data);
+    if(applyLoadedState(record.data, text)){
+      serverVersion = record.version;
+      Store.set(KEY_DATA, text);
+      renderAll();
+      toast("Teststand von anderen Mitgliedern aktualisiert");
     }
   }catch(e){ /* naechster Versuch folgt */ }
 }
